@@ -37,7 +37,8 @@ _DEFAULTS: dict[str, str] = {
     "CACHE_PICKLE":      "true",       # set false to disable pickle layer
 
     # Cover art
-    "COVER_SIZE":        "120",    # px, square; thumbnail shown in dialog
+    "COVER_SIZE":        "120",    # px, square thumbnail in main dialog
+    "COVER_BIG_SIZE":    "480",    # px, square for big cover popup (s / click)
     "INFO_PANEL_BIO_H":  "80",     # px height of artist bio text area
     "COVER_CACHE_DIR":   "",       # blank = system temp; set to persist cache
 

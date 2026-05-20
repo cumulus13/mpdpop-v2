@@ -37,7 +37,7 @@ except ImportError:
 try:
     from mpdpop_artinfo import (ArtInfoLoader, make_info_panel,
                                 update_info_panel, _fill_labels_only,
-                                _set_bio_text)
+                                _set_bio_text, show_big_cover)
     _HAS_ARTINFO = True
 except ImportError:
     _HAS_ARTINFO = False
@@ -271,16 +271,23 @@ def _build_tk_dialog(tracks: list[dict], current: dict, cfg,
         _mpd_host = cfg.get("MPD_HOST", "127.0.0.1")
         _mpd_port = cfg.int("MPD_PORT", 6600)
 
+        # Track which track is currently shown in the panel (for big cover)
+        _panel_track: dict = {}
+
+        def _open_big_cover(*_):
+            if _panel_track:
+                show_big_cover(info_widgets, root, cfg, _panel_track)
+
+        # 's' key (global) + click on cover canvas both open big cover
+        info_widgets["cover_canvas"].bind("<Button-1>", _open_big_cover)
+
         def _startup_fetch():
-            # Determine which track to show on startup:
-            # - MPD playing → that track
-            # - MPD stopped → first track in list (so panel is never idle/stuck)
+            nonlocal _panel_track
             if current_pos is not None and current_pos < len(tracks):
                 track = tracks[current_pos]
             elif tracks:
                 track = tracks[0]
             else:
-                # truly empty playlist — stop indicators, show idle
                 if info_widgets.get("spinner"):
                     info_widgets["spinner"].show_error()
                 if info_widgets.get("pbar"):
@@ -290,6 +297,7 @@ def _build_tk_dialog(tracks: list[dict], current: dict, cfg,
                 if info_widgets.get("source_label"):
                     info_widgets["source_label"].config(text="")
                 return
+            _panel_track = track
             update_info_panel(
                 info_widgets, track, root, loader, cfg,
                 mpd_host=_mpd_host, mpd_port=_mpd_port,
@@ -429,6 +437,7 @@ def _build_tk_dialog(tracks: list[dict], current: dict, cfg,
                 real_idx = int(_get_num(tree.item(iid)["values"][0])) - 1
                 if 0 <= real_idx < len(tracks):
                     t = tracks[real_idx]
+                    _panel_track = t
                     _fill_labels_only(info_widgets, t)
                     # restart animation immediately so panel feels responsive
                     info_widgets["spinner"].start()
@@ -491,6 +500,9 @@ def _build_tk_dialog(tracks: list[dict], current: dict, cfg,
             return "break"
         if k == "Escape":
             root.destroy()
+            return "break"
+        if k in ("s", "S") and focused not in (filter_entry, num_entry):
+            _open_big_cover()
             return "break"
         if k == "Return" and focused is not filter_entry:
             play_selected()

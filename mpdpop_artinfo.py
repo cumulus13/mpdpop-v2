@@ -916,6 +916,8 @@ def _apply_bio(widgets: dict, text: str, source: str) -> None:
 
 def _apply_cover(widgets: dict, data: bytes | None, size: int) -> None:
     """Called on main thread when cover art arrives. Stops spinner."""
+    # Always store raw bytes so big-cover dialog can use them later
+    widgets["_cover_data"] = data
     spinner: _Spinner = widgets["spinner"]
     if not data:
         spinner.show_error()
@@ -949,6 +951,132 @@ def _apply_cover_fallback(canvas, spinner: _Spinner,
         spinner.show_image(photo)
     except Exception:
         spinner.show_error()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Public: show_big_cover  — opens a Toplevel with full-size cover art
+# ─────────────────────────────────────────────────────────────────────────────
+
+def show_big_cover(widgets: dict, root, cfg, track: dict) -> None:
+    """
+    Open a floating Toplevel window showing the cover art at a larger size.
+    Size is controlled by COVER_BIG_SIZE (default 480px square).
+    Triggered by pressing 's' or clicking the cover canvas.
+    If no cover data is available yet, shows a "no cover" message.
+    """
+    try:
+        import tkinter as tk
+    except ImportError:
+        return
+
+    data: bytes | None = widgets.get("_cover_data")   # may be None if not loaded yet
+    big_size = 480
+    try:
+        big_size = int(cfg.get("COVER_BIG_SIZE", "480"))
+    except Exception:
+        pass
+
+    # ── build toplevel ────────────────────────────────────────────────────────
+    win = tk.Toplevel(root)
+    win.title(track.get("title", "Cover Art"))
+    win.configure(bg="#0f172a")
+    win.resizable(False, False)
+    win.attributes("-topmost", True)
+
+    # Centre over parent
+    root.update_idletasks()
+    rx, ry = root.winfo_rootx(), root.winfo_rooty()
+    rw, rh = root.winfo_width(), root.winfo_height()
+    win.geometry(f"+{rx + rw//2 - big_size//2}+{ry + rh//2 - big_size//2}")
+
+    # ── title bar inside window ───────────────────────────────────────────────
+    title_text = track.get("title", "")
+    artist_text = track.get("artist", "")
+    if title_text or artist_text:
+        header = tk.Frame(win, bg="#0f172a")
+        header.pack(fill="x", padx=10, pady=(10, 4))
+        if title_text:
+            tk.Label(header, text=title_text,
+                     bg="#0f172a", fg="#f1f5f9",
+                     font=("Segoe UI", 11, "bold"),
+                     anchor="center").pack(fill="x")
+        if artist_text:
+            tk.Label(header, text=artist_text,
+                     bg="#0f172a", fg="#64748b",
+                     font=("Segoe UI", 9),
+                     anchor="center").pack(fill="x")
+
+    # ── image area ────────────────────────────────────────────────────────────
+    canvas = tk.Canvas(win, width=big_size, height=big_size,
+                       bg="#1e293b", highlightthickness=0)
+    canvas.pack(padx=10, pady=(4, 6))
+
+    if not data:
+        # No cover yet — show placeholder
+        canvas.create_text(big_size // 2, big_size // 2,
+                           text="♪\n\nNo cover available",
+                           fill="#475569",
+                           font=("Segoe UI", 20),
+                           justify="center")
+    else:
+        _draw_big_cover(canvas, data, big_size)
+
+    # ── close hint ────────────────────────────────────────────────────────────
+    tk.Label(win, text="press Esc or S to close",
+             bg="#0f172a", fg="#334155",
+             font=("Segoe UI", 8)).pack(pady=(0, 8))
+
+    win.bind("<Escape>", lambda _: win.destroy())
+    win.bind("<s>",      lambda _: win.destroy())
+    win.bind("<S>",      lambda _: win.destroy())
+    canvas.bind("<Button-1>", lambda _: win.destroy())
+
+    win.focus_set()
+    win.grab_set()   # modal — disable interaction with parent while open
+
+
+def _draw_big_cover(canvas, data: bytes, size: int) -> None:
+    """Render cover bytes onto canvas at given size."""
+    try:
+        from PIL import Image, ImageTk
+        import io
+        img   = Image.open(io.BytesIO(data)).convert("RGB")
+        # Scale to fit inside size×size keeping aspect ratio
+        img.thumbnail((size, size), Image.LANCZOS)
+        # Centre on canvas if not square
+        photo = ImageTk.PhotoImage(img)
+        ox = (size - img.width)  // 2
+        oy = (size - img.height) // 2
+        canvas.create_image(ox, oy, anchor="nw", image=photo)
+        canvas._photo = photo   # prevent GC
+    except ImportError:
+        # No Pillow — try native PNG
+        try:
+            import tkinter as tk
+            if data[:4] != b"\x89PNG":
+                raise ValueError("not PNG")
+            photo = tk.PhotoImage(data=data)
+            pw, ph = photo.width(), photo.height()
+            # subsample to fit
+            factor = max(1, max(pw, ph) // size)
+            if factor > 1:
+                photo = photo.subsample(factor, factor)
+            ox = (size - photo.width())  // 2
+            oy = (size - photo.height()) // 2
+            canvas.create_image(ox, oy, anchor="nw", image=photo)
+            canvas._photo = photo
+        except Exception:
+            canvas.create_text(size // 2, size // 2,
+                               text="♪\n\n(install Pillow\nfor JPEG support)",
+                               fill="#475569",
+                               font=("Segoe UI", 14),
+                               justify="center")
+    except Exception:
+        canvas.create_text(size // 2, size // 2,
+                           text="♪\n\nCould not render cover",
+                           fill="#475569",
+                           font=("Segoe UI", 14),
+                           justify="center")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
