@@ -285,6 +285,85 @@ def _build_tk_dialog(tracks: list[dict], current: dict, cfg,
     root.geometry(f"{DLG_W}x{DLG_H}+{x}+{y}")
     root.attributes("-topmost", True)
 
+
+    # ── Window icon ───────────────────────────────────────────────────────────
+    # Resolution order:
+    #   1. WINDOW_ICON from config (absolute path, or relative to cwd)
+    #   2. WINDOW_ICON relative to the directory where mpdpop.py lives
+    #   3. Auto-scan script dir for mpdpop.ico / mpdpop.png / mpdpop.gif
+    #   4. Auto-scan script dir for any *.ico, then *.png, then *.gif
+    #
+    # All failures are silent — a missing icon never prevents the dialog opening.
+
+    def _resolve_icon() -> str:
+        """Return first existing icon file path, or empty string."""
+        cfg_val  = cfg.get("WINDOW_ICON", "").strip()
+        # locate the directory that contains mpdpop.py (works even when run
+        # from a different cwd or via a symlink)
+        try:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+        except NameError:
+            script_dir = os.getcwd()
+
+        candidates: list[str] = []
+
+        if cfg_val:
+            # 1 — exactly as configured (absolute or cwd-relative)
+            candidates.append(os.path.expanduser(cfg_val))
+            # 2 — same filename relative to the script directory
+            candidates.append(
+                os.path.join(script_dir, os.path.expanduser(cfg_val))
+            )
+
+        # 3 — named variants in script dir
+        for name in ("mpdpop.ico", "mpdpop.png", "mpdpop.gif",
+                     "icon.ico",   "icon.png",   "icon.gif"):
+            candidates.append(os.path.join(script_dir, name))
+
+        # 4 — any icon file in script dir (ico first, then png, then gif)
+        try:
+            files = os.listdir(script_dir)
+            for ext in (".ico", ".png", ".gif"):
+                for f in sorted(files):
+                    if f.lower().endswith(ext):
+                        candidates.append(os.path.join(script_dir, f))
+        except OSError:
+            pass
+
+        for path in candidates:
+            if path and os.path.isfile(path):
+                return path
+        return ""
+
+    def _apply_icon(icon_path: str) -> None:
+        if not icon_path:
+            return
+        try:
+            ext = os.path.splitext(icon_path)[1].lower()
+            if ext == ".ico" and sys.platform == "win32":
+                root.iconbitmap(icon_path)
+                return
+            # All other formats — try Pillow first, then native tkinter PNG
+            try:
+                from PIL import Image, ImageTk as _ITk
+                img   = Image.open(icon_path).convert("RGBA")
+                icons = []
+                for sz in (32, 16):
+                    i = img.copy()
+                    i.thumbnail((sz, sz), Image.LANCZOS)
+                    icons.append(_ITk.PhotoImage(i))
+                root.iconphoto(True, *icons)
+                root._icon_refs = icons          # prevent GC
+            except ImportError:
+                import tkinter as _tk
+                photo = _tk.PhotoImage(file=icon_path)
+                root.iconphoto(True, photo)
+                root._icon_ref = photo
+        except Exception:
+            pass   # silently skip on any error
+
+    _apply_icon(_resolve_icon())
+
     # ── Treeview style ────────────────────────────────────────────────────────
     style = ttk.Style()
     style.theme_use("clam")

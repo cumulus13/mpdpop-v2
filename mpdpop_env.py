@@ -50,6 +50,7 @@ _DEFAULTS: dict[str, str] = {
     "DIALOG_WIDTH":      "780",
     "DIALOG_HEIGHT":     "620",
     "PAGE_STEP":         "10",
+    "WINDOW_ICON":       "",       # path to icon file (.ico / .png / .gif)
 }
 
 
