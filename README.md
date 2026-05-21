@@ -9,7 +9,7 @@ are absent.
 
 ---
 
-[![Demo](https://raw.githubusercontent.com/cumulus13/mpdpop-v2/master/mpdpop.webp)](https://raw.githubusercontent.com/cumulus13/mpdpop-v2/master/mpdpop.webp)
+[![Demo](https://github.com/cumulus13/mpdpop-v2/blob/b4348ca04cdf2c30cb142c2a7b27ef7203880181/mpdpop.webp)](https://github.com/cumulus13/mpdpop-v2/blob/b4348ca04cdf2c30cb142c2a7b27ef7203880181/mpdpop.webp)
 
 ---
 
