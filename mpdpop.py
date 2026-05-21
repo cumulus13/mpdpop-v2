@@ -221,8 +221,67 @@ def _build_tk_dialog(tracks: list[dict], current: dict, cfg,
     root.resizable(True, True)
     root.configure(bg="#111827")
 
-    x = max(0, min(mx - DLG_W // 2, sw - DLG_W))
-    y = max(0, min(my - DLG_H // 2, sh - DLG_H))
+    # ── Multi-monitor: find monitor containing the mouse cursor ──────────────
+    def _get_monitor_rect(mx: int, my: int) -> tuple[int, int, int, int]:
+        """
+        Return (x, y, w, h) of the monitor that contains the cursor.
+        Falls back to (0, 0, sw, sh) from mouse_pos_fn if detection fails.
+        Supports Windows (ctypes EnumDisplayMonitors), Linux (xrandr/xdpyinfo),
+        macOS (AppKit/Quartz), with a plain fallback for all other cases.
+        """
+        try:
+            if sys.platform == "win32":
+                import ctypes
+                import ctypes.wintypes as wt
+                MONITOR_DEFAULTTONEAREST = 2
+                pt = wt.POINT(mx, my)
+                hmon = ctypes.windll.user32.MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST)
+                class MONITORINFO(ctypes.Structure):
+                    _fields_ = [("cbSize", wt.DWORD),
+                                ("rcMonitor", wt.RECT),
+                                ("rcWork",    wt.RECT),
+                                ("dwFlags",   wt.DWORD)]
+                mi = MONITORINFO()
+                mi.cbSize = ctypes.sizeof(MONITORINFO)
+                ctypes.windll.user32.GetMonitorInfoW(hmon, ctypes.byref(mi))
+                r = mi.rcWork   # use work area (excludes taskbar)
+                return r.left, r.top, r.right - r.left, r.bottom - r.top
+
+            elif sys.platform == "darwin":
+                try:
+                    from AppKit import NSScreen  # type: ignore
+                    for screen in NSScreen.screens():
+                        f = screen.frame()
+                        x, y, w, h = int(f.origin.x), int(f.origin.y), \
+                                     int(f.size.width), int(f.size.height)
+                        if x <= mx < x + w and y <= my < y + h:
+                            return x, y, w, h
+                except ImportError:
+                    pass
+
+            else:
+                # Linux: parse xrandr output
+                try:
+                    import re as _re
+                    out = subprocess.run(
+                        ["xrandr", "--query"], capture_output=True, text=True).stdout
+                    for m in _re.finditer(
+                            r'(\d+)x(\d+)\+(\d+)\+(\d+)', out):
+                        w, h, ox, oy = (int(m.group(i)) for i in (1, 2, 3, 4))
+                        if ox <= mx < ox + w and oy <= my < oy + h:
+                            return ox, oy, w, h
+                except Exception:
+                    pass
+
+        except Exception:
+            pass
+
+        # Plain fallback: use full virtual screen from mouse_pos_fn
+        return 0, 0, sw, sh
+
+    mon_x, mon_y, mon_w, mon_h = _get_monitor_rect(mx, my)
+    x = mon_x + max(0, min(mx - mon_x - DLG_W // 2, mon_w - DLG_W))
+    y = mon_y + max(0, min(my - mon_y - DLG_H // 2, mon_h - DLG_H))
     root.geometry(f"{DLG_W}x{DLG_H}+{x}+{y}")
     root.attributes("-topmost", True)
 
@@ -319,7 +378,141 @@ def _build_tk_dialog(tracks: list[dict], current: dict, cfg,
                             relief="flat", bd=4)
     filter_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
 
-    # ── Track list ────────────────────────────────────────────────────────────
+    # ── Footer — packed at BOTTOM before list_frame so it is never hidden ─────
+    footer = tk.Frame(root, bg="#0f172a", pady=8)
+    footer.pack(side="bottom", fill="x", padx=8)
+
+    # ── Command bar — also at bottom, above footer, hidden by default ─────────
+    CMD_BG     = "#020617"
+    CMD_FG     = "#22d3ee"
+    CMD_OUT_FG = "#94a3b8"
+    CMD_ERR_FG = "#f87171"
+    CMD_HIST   = cfg.int("CMD_HISTORY", 50)
+
+    cmd_frame = tk.Frame(root, bg=CMD_BG)
+    # NOT packed yet — toggled in/out above footer
+
+    cmd_bar = tk.Frame(cmd_frame, bg=CMD_BG, pady=3)
+    cmd_bar.pack(fill="x", padx=6)
+
+    tk.Label(cmd_bar, text="[C] cmd:",
+             bg=CMD_BG, fg="#475569",
+             font=(font_name, 9)).pack(side="left", padx=(0, 4))
+
+    cmd_var   = tk.StringVar()
+    cmd_entry = tk.Entry(cmd_bar, textvariable=cmd_var,
+                         font=(font_name, 10),
+                         bg="#0c1a2e", fg=CMD_FG,
+                         insertbackground=CMD_FG,
+                         relief="flat", bd=4, width=40)
+    cmd_entry.pack(side="left", fill="x", expand=True)
+
+    out_frame = tk.Frame(cmd_frame, bg=CMD_BG)
+    out_frame.pack(fill="x", padx=6, pady=(0, 4))
+
+    cmd_out = tk.Text(out_frame,
+                      height=4, wrap="word",
+                      bg=CMD_BG, fg=CMD_OUT_FG,
+                      font=(font_name, 8),
+                      relief="flat", bd=0,
+                      padx=4, pady=2,
+                      state="disabled",
+                      exportselection=False)
+    out_vsb = tk.Scrollbar(out_frame, orient="vertical", command=cmd_out.yview)
+    cmd_out.configure(yscrollcommand=out_vsb.set)
+    cmd_out.pack(side="left", fill="both", expand=True)
+    out_vsb.pack(side="right", fill="y")
+
+    cmd_out.tag_configure("err", foreground=CMD_ERR_FG)
+    cmd_out.tag_configure("ok",  foreground="#4ade80")
+    cmd_out.tag_configure("hdr", foreground="#64748b")
+
+    _cmd_history: list[str] = []
+    _cmd_hist_idx: list[int] = [-1]
+
+    def _cmd_write(text: str, tag: str = "") -> None:
+        cmd_out.config(state="normal")
+        cmd_out.insert("end", text, tag)
+        cmd_out.see("end")
+        cmd_out.config(state="disabled")
+
+    def _cmd_clear() -> None:
+        cmd_out.config(state="normal")
+        cmd_out.delete("1.0", "end")
+        cmd_out.config(state="disabled")
+
+    def _run_command(*_) -> None:
+        raw = cmd_var.get().strip()
+        if not raw:
+            return
+        cmd_var.set("")
+        _cmd_hist_idx[0] = -1
+        if raw not in _cmd_history:
+            _cmd_history.insert(0, raw)
+            if len(_cmd_history) > CMD_HIST:
+                _cmd_history.pop()
+        _cmd_write(f"$ {raw}\n", "hdr")
+
+        def _exec():
+            import subprocess as _sp
+            try:
+                r = _sp.run(raw, shell=True, capture_output=True,
+                            text=True, timeout=10)
+                stdout = r.stdout.rstrip()
+                stderr = r.stderr.rstrip()
+                def _update():
+                    if stdout:
+                        _cmd_write(stdout + "\n",
+                                   "ok" if r.returncode == 0 else "err")
+                    if stderr:
+                        _cmd_write(stderr + "\n", "err")
+                    if not stdout and not stderr:
+                        _cmd_write(f"(exit {r.returncode})\n",
+                                   "ok" if r.returncode == 0 else "err")
+                root.after(0, _update)
+            except Exception as e:
+                root.after(0, lambda: _cmd_write(f"Error: {e}\n", "err"))
+
+        import threading as _th
+        _th.Thread(target=_exec, daemon=True).start()
+
+    def _cmd_hist_up(*_) -> str:
+        if not _cmd_history:
+            return "break"
+        _cmd_hist_idx[0] = min(_cmd_hist_idx[0] + 1, len(_cmd_history) - 1)
+        cmd_var.set(_cmd_history[_cmd_hist_idx[0]])
+        cmd_entry.icursor("end")
+        return "break"
+
+    def _cmd_hist_down(*_) -> str:
+        if _cmd_hist_idx[0] <= 0:
+            _cmd_hist_idx[0] = -1
+            cmd_var.set("")
+            return "break"
+        _cmd_hist_idx[0] -= 1
+        cmd_var.set(_cmd_history[_cmd_hist_idx[0]])
+        cmd_entry.icursor("end")
+        return "break"
+
+    cmd_entry.bind("<Return>",  _run_command)
+    cmd_entry.bind("<Up>",      _cmd_hist_up)
+    cmd_entry.bind("<Down>",    _cmd_hist_down)
+    cmd_entry.bind("<Escape>",  lambda _: _toggle_cmd())
+
+    _cmd_visible = [False]
+
+    def _toggle_cmd(*_) -> None:
+        if _cmd_visible[0]:
+            cmd_frame.pack_forget()
+            _cmd_visible[0] = False
+            _focus_tree()
+        else:
+            # pack above footer (both are side=bottom, so last-packed = topmost)
+            cmd_frame.pack(side="bottom", fill="x", before=footer)
+            _cmd_visible[0] = True
+            cmd_entry.focus_set()
+
+    # ── Track list — packed LAST so it fills remaining space ─────────────────
     list_frame = tk.Frame(root, bg="#111827")
     list_frame.pack(fill="both", expand=True, padx=8, pady=6)
 
@@ -482,6 +675,9 @@ def _build_tk_dialog(tracks: list[dict], current: dict, cfg,
     def global_key(event):
         k       = event.keysym
         focused = root.focus_get()
+        # When command entry has focus, only Escape passes through globally
+        if focused is cmd_entry and k != "Escape":
+            return   # let cmd_entry bindings handle it
         if k in ("Up", "Down"):
             _focus_tree()
             _move_selection(-1 if k == "Up" else 1)
@@ -498,10 +694,16 @@ def _build_tk_dialog(tracks: list[dict], current: dict, cfg,
             num_entry.focus_set()
             num_entry.select_range(0, "end")
             return "break"
-        if k == "Escape":
-            root.destroy()
+        if k in ("c", "C") and focused not in (filter_entry, num_entry, cmd_entry):
+            _toggle_cmd()
             return "break"
-        if k in ("s", "S") and focused not in (filter_entry, num_entry):
+        if k == "Escape":
+            if _cmd_visible[0]:
+                _toggle_cmd()
+            else:
+                root.destroy()
+            return "break"
+        if k in ("s", "S") and focused not in (filter_entry, num_entry, cmd_entry):
             _open_big_cover()
             return "break"
         if k == "Return" and focused is not filter_entry:
@@ -530,10 +732,7 @@ def _build_tk_dialog(tracks: list[dict], current: dict, cfg,
     filter_entry.bind("<Key>", filter_key)
     filter_var.trace_add("write", lambda *_: populate(filter_var.get()))
 
-    # ── Footer ────────────────────────────────────────────────────────────────
-    footer = tk.Frame(root, bg="#0f172a", pady=8)
-    footer.pack(fill="x", padx=8)
-
+    # ── Footer widgets ────────────────────────────────────────────────────────
     tk.Label(footer, text="[T] Track #:",
              bg="#0f172a", fg="#64748b",
              font=(font_name, 10)).pack(side="left", padx=(0, 4))
@@ -562,6 +761,18 @@ def _build_tk_dialog(tracks: list[dict], current: dict, cfg,
 
     _btn("Cancel",   root.destroy)
     _btn("Play  ▶",  play_selected, accent=True)
+
+    # Update hint bar text now that all shortcuts are wired
+    try:
+        for child in topbar.winfo_children():
+            if hasattr(child, "cget") and "↑↓" in str(child.cget("text")):
+                child.config(text=(
+                    "  ↑↓ nav  ·  Enter play  ·  F filter  ·  T track#  ·  "
+                    "S cover  ·  C cmd  ·  PgUp/Dn scroll  ·  Esc cancel"
+                ))
+                break
+    except Exception:
+        pass
 
     root.after(50, _focus_tree)
     root.mainloop()

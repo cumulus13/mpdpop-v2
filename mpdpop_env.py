@@ -46,7 +46,7 @@ _DEFAULTS: dict[str, str] = {
     "BIO_MAX_CHARS":     "600",    # truncate bio text to this many characters
     "BIO_LANG":          "en",     # Wikipedia language code
 
-    # UI
+    "CMD_HISTORY":       "50",     # max command history entries
     "DIALOG_WIDTH":      "780",
     "DIALOG_HEIGHT":     "620",
     "PAGE_STEP":         "10",
