@@ -217,7 +217,7 @@ def _build_tk_dialog(tracks: list[dict], current: dict, cfg,
     mx, my, sw, sh = mouse_pos_fn()
 
     root = tk.Tk()
-    root.title("MPD Controller")
+    root.title("MPDPop")
     root.resizable(True, True)
     root.configure(bg="#111827")
 
@@ -385,7 +385,7 @@ def _build_tk_dialog(tracks: list[dict], current: dict, cfg,
     # ── Top bar ───────────────────────────────────────────────────────────────
     topbar = tk.Frame(root, bg="#0f172a")
     topbar.pack(fill="x")
-    tk.Label(topbar, text="  ▶  MPD Controller",
+    tk.Label(topbar, text="  ▶  MPDPop",
              bg="#0f172a", fg="#f1f5f9",
              font=(font_name, 13, "bold"),
              anchor="w", pady=8).pack(fill="x", padx=10)
@@ -959,7 +959,7 @@ class LinuxInputDialog(InputDialog):
     def _zenity(self, tracks: list[dict], current_pos) -> str | None:
         cmd = [
             "zenity", "--list",
-            "--title", "MPD Controller",
+            "--title", "MPDPop",
             "--text", f"Select a track  ({len(tracks)} total)",
             "--column", "#", "--column", "Title",
             "--column", "Artist", "--column", "Duration",
@@ -981,7 +981,7 @@ class LinuxInputDialog(InputDialog):
         try:
             content = self._format_content(tracks, current_pos)
             r = subprocess.run(
-                ["kdialog", "--title", "MPD Controller",
+                ["kdialog", "--title", "MPDPop",
                  "--inputbox", content + "\n\nEnter track number:", ""],
                 capture_output=True, text=True)
             return r.stdout.strip() if r.returncode == 0 else None
