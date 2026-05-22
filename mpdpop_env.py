@@ -33,8 +33,9 @@ _DEFAULTS: dict[str, str] = {
     "CACHE_REDIS_URL":   "",           # e.g. redis://localhost:6379/0  (blank = skip)
     "CACHE_PICKLE_DIR":  "",           # blank = auto (alongside DB)
     "CACHE_DB_URL":      "",           # blank = sqlite in ~/.local/share/mpdpop/
-    "CACHE_TTL_DAYS":    "30",         # days before cached bio expires
-    "CACHE_PICKLE":      "true",       # set false to disable pickle layer
+    "CACHE_TTL_DAYS":        "30",     # days before cached bio expires completely
+    "CACHE_REVALIDATE_DAYS": "7",      # days before silently re-fetching stale bio
+    "CACHE_PICKLE":          "true",   # set false to disable pickle layer
 
     # Cover art
     "COVER_SIZE":        "120",    # px, square thumbnail in main dialog

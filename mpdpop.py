@@ -217,7 +217,7 @@ def _build_tk_dialog(tracks: list[dict], current: dict, cfg,
     mx, my, sw, sh = mouse_pos_fn()
 
     root = tk.Tk()
-    root.title("MPDPop")
+    root.title("MPD Controller")
     root.resizable(True, True)
     root.configure(bg="#111827")
 
@@ -385,7 +385,7 @@ def _build_tk_dialog(tracks: list[dict], current: dict, cfg,
     # ── Top bar ───────────────────────────────────────────────────────────────
     topbar = tk.Frame(root, bg="#0f172a")
     topbar.pack(fill="x")
-    tk.Label(topbar, text="  ▶  MPDPop",
+    tk.Label(topbar, text="  ▶  MPD Controller",
              bg="#0f172a", fg="#f1f5f9",
              font=(font_name, 13, "bold"),
              anchor="w", pady=8).pack(fill="x", padx=10)
@@ -474,7 +474,7 @@ def _build_tk_dialog(tracks: list[dict], current: dict, cfg,
     cmd_bar = tk.Frame(cmd_frame, bg=CMD_BG, pady=3)
     cmd_bar.pack(fill="x", padx=6)
 
-    tk.Label(cmd_bar, text="[C] cmd:",
+    tk.Label(cmd_bar, text="[C] mpc>",
              bg=CMD_BG, fg="#475569",
              font=(font_name, 9)).pack(side="left", padx=(0, 4))
 
@@ -509,6 +509,42 @@ def _build_tk_dialog(tracks: list[dict], current: dict, cfg,
     _cmd_history: list[str] = []
     _cmd_hist_idx: list[int] = [-1]
 
+    # MPC shorthand: words that are mpc sub-commands (most common ones).
+    # If the user types just the sub-command (or sub-command + args) without
+    # the "mpc" prefix, prepend it automatically.
+    # Full commands ("mpc next", "ls /", "echo hi") are passed through as-is.
+    _MPC_SUBCMDS = {
+        "play", "pause", "toggle", "stop", "next", "prev", "previous",
+        "seek", "volume", "repeat", "random", "single", "consume",
+        "status", "current", "stats", "search", "find", "list",
+        "add", "insert", "clear", "del", "delete", "move",
+        "playlist", "load", "save", "rm", "update", "rescan",
+        "outputs", "enable", "disable", "crossfade", "mixrampdb",
+        "replaygain", "ls", "tab", "version", "queued",
+    }
+
+    def _resolve_cmd(raw: str) -> str:
+        """
+        Expand shorthand to full mpc command:
+          "next"        → "mpc next"
+          "play 3"      → "mpc play 3"
+          "volume +5"   → "mpc volume +5"
+          "mpc next"    → "mpc next"      (already prefixed, unchanged)
+          "ls /"        → "ls /"          (not an mpc sub-command, run as-is)
+        """
+        parts = raw.strip().split()
+        if not parts:
+            return raw
+        first = parts[0].lower()
+        # Already has mpc prefix — pass through
+        if first == "mpc":
+            return raw
+        # Known mpc sub-command without prefix — prepend mpc
+        if first in _MPC_SUBCMDS:
+            return "mpc " + raw.strip()
+        # Unknown word — run as-is (shell command)
+        return raw
+
     def _cmd_write(text: str, tag: str = "") -> None:
         cmd_out.config(state="normal")
         cmd_out.insert("end", text, tag)
@@ -526,16 +562,23 @@ def _build_tk_dialog(tracks: list[dict], current: dict, cfg,
             return
         cmd_var.set("")
         _cmd_hist_idx[0] = -1
+
+        resolved = _resolve_cmd(raw)
+
+        # Store the shorthand the user typed (not the resolved form)
         if raw not in _cmd_history:
             _cmd_history.insert(0, raw)
             if len(_cmd_history) > CMD_HIST:
                 _cmd_history.pop()
-        _cmd_write(f"$ {raw}\n", "hdr")
+
+        # Show prompt: if we expanded it, show both
+        prompt = f"$ {resolved}\n" if resolved == raw else f"$ {raw}  →  {resolved}\n"
+        _cmd_write(prompt, "hdr")
 
         def _exec():
             import subprocess as _sp
             try:
-                r = _sp.run(raw, shell=True, capture_output=True,
+                r = _sp.run(resolved, shell=True, capture_output=True,
                             text=True, timeout=10)
                 stdout = r.stdout.rstrip()
                 stderr = r.stderr.rstrip()
@@ -573,10 +616,38 @@ def _build_tk_dialog(tracks: list[dict], current: dict, cfg,
         cmd_entry.icursor("end")
         return "break"
 
-    cmd_entry.bind("<Return>",  _run_command)
-    cmd_entry.bind("<Up>",      _cmd_hist_up)
-    cmd_entry.bind("<Down>",    _cmd_hist_down)
-    cmd_entry.bind("<Escape>",  lambda _: _toggle_cmd())
+    # Focus cycle order when Tab is pressed inside cmd_entry:
+    #   cmd_entry → filter_entry → num_entry → tree → (back to cmd_entry)
+    # Alt+F and Alt+T jump directly to filter / track# from anywhere.
+    def _cmd_key(event) -> str | None:
+        k = event.keysym
+        if k == "Return":
+            _run_command()
+            return "break"
+        if k == "Up":
+            return _cmd_hist_up()
+        if k == "Down":
+            return _cmd_hist_down()
+        if k == "Escape":
+            _toggle_cmd()
+            return "break"
+        if k == "Tab":
+            # cycle: cmd → filter → num → tree → cmd
+            filter_entry.focus_set()
+            filter_entry.icursor("end")
+            return "break"
+        if k == "f" and (event.state & 0x8):    # Alt+F → focus filter
+            filter_entry.focus_set()
+            filter_entry.icursor("end")
+            return "break"
+        if k == "t" and (event.state & 0x8):    # Alt+T → focus track#
+            num_entry.focus_set()
+            num_entry.select_range(0, "end")
+            return "break"
+        # All other keys (letters, numbers, symbols) — let entry handle normally
+        return None
+
+    cmd_entry.bind("<Key>", _cmd_key)
 
     _cmd_visible = [False]
 
@@ -841,13 +912,12 @@ def _build_tk_dialog(tracks: list[dict], current: dict, cfg,
     _btn("Cancel",   root.destroy)
     _btn("Play  ▶",  play_selected, accent=True)
 
-    # Update hint bar text now that all shortcuts are wired
     try:
         for child in topbar.winfo_children():
             if hasattr(child, "cget") and "↑↓" in str(child.cget("text")):
                 child.config(text=(
                     "  ↑↓ nav  ·  Enter play  ·  F filter  ·  T track#  ·  "
-                    "S cover  ·  C cmd  ·  PgUp/Dn scroll  ·  Esc cancel"
+                    "S cover  ·  C cmd  [Tab/Alt+F/T to leave cmd]  ·  Esc cancel"
                 ))
                 break
     except Exception:
@@ -959,7 +1029,7 @@ class LinuxInputDialog(InputDialog):
     def _zenity(self, tracks: list[dict], current_pos) -> str | None:
         cmd = [
             "zenity", "--list",
-            "--title", "MPDPop",
+            "--title", "MPD Controller",
             "--text", f"Select a track  ({len(tracks)} total)",
             "--column", "#", "--column", "Title",
             "--column", "Artist", "--column", "Duration",
@@ -981,7 +1051,7 @@ class LinuxInputDialog(InputDialog):
         try:
             content = self._format_content(tracks, current_pos)
             r = subprocess.run(
-                ["kdialog", "--title", "MPDPop",
+                ["kdialog", "--title", "MPD Controller",
                  "--inputbox", content + "\n\nEnter track number:", ""],
                 capture_output=True, text=True)
             return r.stdout.strip() if r.returncode == 0 else None

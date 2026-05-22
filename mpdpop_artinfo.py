@@ -314,41 +314,148 @@ class ArtistBioFetcher:
         self.cfg   = cfg
         self.cache = cache or BioCache(cfg)
 
-    def fetch(self, artist: str, title: str = "") -> str:
+    def fetch(self, artist: str, title: str = "") -> tuple[str, str]:
+        """
+        Return (bio_text, source_label).
+
+        Cache strategy — stale-while-revalidate:
+          • Always serve from cache immediately if data exists (fast UI).
+          • If cached entry is older than CACHE_REVALIDATE_DAYS, silently
+            re-fetch in background. If new data differs, update the cache.
+            The current call still returns the cached version instantly.
+          • Not-found results are never cached — all services retried next call.
+        """
         if not artist:
-            return ""
-        max_chars = self.cfg.int("BIO_MAX_CHARS", 600)
+            return "", ""
+
+        import time as _time
+        max_chars       = self.cfg.int("BIO_MAX_CHARS",        600)
+        revalidate_secs = self.cfg.int("CACHE_REVALIDATE_DAYS", 7) * 86400
 
         # ── cache read ────────────────────────────────────────────────────────
-        cached = self.cache.get("bio", artist)
-        if cached is not None:
-            return cached   # already truncated from previous fetch
+        cached     = self.cache.get("bio",        artist)
+        cached_src = self.cache.get("bio_source", artist)
+        cached_at  = self.cache.get("bio_cached_at", artist)
 
-        bio = (
-            self._from_lastfm(artist)
-            or self._from_discogs(artist)
-            or self._from_musicbrainz(artist)
-            or self._from_wikipedia(artist)
-        )
+        if cached is not None and not cached.startswith("No biography found"):
+            # Determine age of cached entry
+            age_secs = None
+            if cached_at:
+                try:
+                    age_secs = _time.time() - float(cached_at)
+                except (ValueError, TypeError):
+                    age_secs = None
+
+            is_stale = (age_secs is None) or (age_secs > revalidate_secs)
+
+            if is_stale:
+                # Serve cached version immediately, revalidate silently
+                threading.Thread(
+                    target=self._revalidate,
+                    args=(artist, cached, cached_src, max_chars),
+                    daemon=True,
+                ).start()
+                label = f"{cached_src} (cached·updating…)" if cached_src \
+                        else "cached·updating…"
+            else:
+                label = f"{cached_src} (cached)" if cached_src else "cached"
+
+            return cached, label
+
+        # ── cache miss — full live fetch ──────────────────────────────────────
+        return self._live_fetch(artist, max_chars)
+
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _live_fetch(self, artist: str, max_chars: int) -> tuple[str, str]:
+        """Try each service in order, clean result, write all cache keys."""
+        import time as _time
+
+        bio    = ""
+        source = ""
 
         if not bio:
-            result = f'No biography found for "{artist}".'
-            self.cache.set("bio", result, artist)
-            return result
+            bio = self._from_lastfm(artist)
+            if bio: source = "via Last.fm"
+        if not bio:
+            bio = self._from_discogs(artist)
+            if bio: source = "via Discogs"
+        if not bio:
+            bio = self._from_musicbrainz(artist)
+            if bio: source = "via MusicBrainz"
+        if not bio:
+            bio = self._from_wikipedia(artist)
+            if bio: source = "via Wikipedia"
 
-        # strip HTML tags
+        if not bio:
+            # Never cache not-found — retry all services next call
+            return f'No biography found for "{artist}".', "not found"
+
+        # clean
         bio = re.sub(r"<[^>]+>", "", bio)
-        # collapse whitespace
         bio = re.sub(r"\s+", " ", bio).strip()
-        # remove Last.fm "Read more on Last.fm" footer
-        bio = re.sub(r"\s*Read more on Last\.fm\s*$", "", bio, flags=re.IGNORECASE).strip()
-
+        bio = re.sub(r"\s*Read more on Last\.fm\s*$", "", bio,
+                     flags=re.IGNORECASE).strip()
         result = _truncate(bio, max_chars)
 
-        # ── cache write (all layers) ──────────────────────────────────────────
-        self.cache.set("bio", result, artist)
+        # write all three keys atomically
+        now = str(_time.time())
+        self.cache.set("bio",           result, artist)
+        self.cache.set("bio_source",    source, artist)
+        self.cache.set("bio_cached_at", now,    artist)
 
-        return result
+        return result, source
+
+    def _revalidate(self, artist: str, old_text: str,
+                    old_src: str, max_chars: int) -> None:
+        """
+        Background revalidation — called when cached entry is stale.
+        Fetches fresh data; if it differs from cached text, updates all keys.
+        Never called from the main thread — safe to block on network here.
+        """
+        try:
+            new_text, new_source = self._live_fetch(artist, max_chars)
+            # _live_fetch already wrote cache if data was found.
+            # If no change, the timestamp was still refreshed — that's fine.
+        except Exception:
+            pass   # network error — keep old cached data, try again next time
+
+    def _backfill_source(self, artist: str) -> None:
+        """
+        Background: for old cache entries that have bio text but no source.
+        Probes services to identify origin, writes ONLY bio_source + bio_cached_at.
+        Never overwrites bio text.
+        """
+        import time as _time
+        source = ""
+        if self._from_lastfm(artist):      source = "via Last.fm"
+        elif self._from_discogs(artist):   source = "via Discogs"
+        elif self._from_musicbrainz(artist): source = "via MusicBrainz"
+        elif self._from_wikipedia(artist): source = "via Wikipedia"
+        if source:
+            self.cache.set("bio_source",    source,            artist)
+            self.cache.set("bio_cached_at", str(_time.time()), artist)
+
+        return result, source
+
+    def _backfill_source(self, artist: str) -> None:
+        """
+        Called in a background thread only when bio text is cached but
+        bio_source is not. Probes each service in order — just enough to
+        identify which one has data — then writes ONLY the source key.
+        Never touches the cached bio text.
+        """
+        source = ""
+        if self._from_lastfm(artist):
+            source = "via Last.fm"
+        elif self._from_discogs(artist):
+            source = "via Discogs"
+        elif self._from_musicbrainz(artist):
+            source = "via MusicBrainz"
+        elif self._from_wikipedia(artist):
+            source = "via Wikipedia"
+        if source:
+            self.cache.set("bio_source", source, artist)
 
     # ── source 1: Last.fm ─────────────────────────────────────────────────────
 
@@ -467,9 +574,11 @@ class ArtInfoLoader:
         mpd_host: str = "127.0.0.1",
         mpd_port: int = 6600,
         on_cover: Callable[[bytes | None], None] | None = None,
-        on_bio: Callable[[str], None] | None = None,
+        on_bio: Callable[[str, str], None] | None = None,
     ) -> None:
-        """Start background threads for cover + bio. Returns immediately."""
+        """Start background threads for cover + bio. Returns immediately.
+        on_bio is called as on_bio(text, source) where source is the service name.
+        """
         if on_cover:
             threading.Thread(
                 target=self._cover_worker,
@@ -494,10 +603,10 @@ class ArtInfoLoader:
 
     def _bio_worker(self, artist, title, callback):
         try:
-            text = self._bio_fetcher.fetch(artist, title)
-            callback(text)
+            text, source = self._bio_fetcher.fetch(artist, title)
+            callback(text, source)
         except Exception:
-            callback("")
+            callback("", "")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -866,10 +975,9 @@ def update_info_panel(widgets: dict, track: dict, root,
             return
         root.after(0, lambda: _apply_cover(widgets, data, cover_size))
 
-    def _on_bio(text: str):
+    def _on_bio(text: str, source: str):
         if widgets.get("_token") is not token:
             return
-        source = _bio_source_name(cfg)
         root.after(0, lambda: _apply_bio(widgets, text, source))
 
     loader.load(
@@ -887,14 +995,6 @@ def _set_label_truncated(label, text: str, max_chars: int) -> None:
     if len(text) > max_chars:
         text = text[:max_chars - 1] + "…"
     label.config(text=text)
-
-
-def _bio_source_name(cfg) -> str:
-    if cfg.has("LASTFM_API_KEY"):
-        return "via Last.fm"
-    if cfg.has("DISCOGS_TOKEN"):
-        return "via Discogs"
-    return "via Wikipedia"
 
 
 def _set_bio_text(bio_widget, text: str) -> None:
@@ -1100,7 +1200,8 @@ if __name__ == "__main__":
     def show_cover(data):
         print(f"  Cover art  : {len(data)} bytes" if data else "  Cover art  : not found")
 
-    def show_bio(text):
+    def show_bio(text, source):
+        print(f"  Bio source : {source}")
         print(f"  Bio ({len(text)} chars):\n  {text[:300]}…")
         done.set()
 
