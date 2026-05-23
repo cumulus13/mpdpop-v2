@@ -170,7 +170,8 @@ class MPDClient:
 # ============================================
 class InputDialog(ABC):
     @abstractmethod
-    def show(self, tracks: list[dict], current: dict) -> str | None:
+    def show(self, tracks: list[dict], current: dict,
+             client=None) -> str | None:
         pass
 
     def _format_content(self, tracks: list[dict], current_pos: int | None) -> str:
@@ -189,7 +190,8 @@ class InputDialog(ABC):
 # SHARED TKINTER DIALOG  (Windows + Linux + macOS)
 # ============================================
 def _build_tk_dialog(tracks: list[dict], current: dict, cfg,
-                     font_name: str, mouse_pos_fn) -> str | None:
+                     font_name: str, mouse_pos_fn,
+                     client=None) -> str | None:
     """
     Full-featured Tkinter dialog shared by all platforms.
 
@@ -591,6 +593,9 @@ def _build_tk_dialog(tracks: list[dict], current: dict, cfg,
                     if not stdout and not stderr:
                         _cmd_write(f"(exit {r.returncode})\n",
                                    "ok" if r.returncode == 0 else "err")
+                    # Refresh playlist after every command — handles del, add,
+                    # clear, move, load, etc.  Diff-based: safe for 1000+ songs.
+                    root.after(50, _refresh_playlist)
                 root.after(0, _update)
             except Exception as e:
                 root.after(0, lambda: _cmd_write(f"Error: {e}\n", "err"))
@@ -618,7 +623,7 @@ def _build_tk_dialog(tracks: list[dict], current: dict, cfg,
 
     # Focus cycle order when Tab is pressed inside cmd_entry:
     #   cmd_entry → filter_entry → num_entry → tree → (back to cmd_entry)
-    # Alt+F and Alt+T jump directly to filter / track# from anywhere.
+    # Alt+F and Alt+T: bound directly as <Alt-f>/<Alt-t> — reliable cross-platform.
     def _cmd_key(event) -> str | None:
         k = event.keysym
         if k == "Return":
@@ -632,22 +637,22 @@ def _build_tk_dialog(tracks: list[dict], current: dict, cfg,
             _toggle_cmd()
             return "break"
         if k == "Tab":
-            # cycle: cmd → filter → num → tree → cmd
             filter_entry.focus_set()
             filter_entry.icursor("end")
             return "break"
-        if k == "f" and (event.state & 0x8):    # Alt+F → focus filter
-            filter_entry.focus_set()
-            filter_entry.icursor("end")
-            return "break"
-        if k == "t" and (event.state & 0x8):    # Alt+T → focus track#
-            num_entry.focus_set()
-            num_entry.select_range(0, "end")
-            return "break"
-        # All other keys (letters, numbers, symbols) — let entry handle normally
+        # All other keys — let entry handle (type normally)
         return None
 
-    cmd_entry.bind("<Key>", _cmd_key)
+    cmd_entry.bind("<Key>",   _cmd_key)
+    # Direct Alt bindings — not intercepted by _cmd_key's catch-all
+    cmd_entry.bind("<Alt-f>", lambda e: (filter_entry.focus_set(),
+                                         filter_entry.icursor("end")) or "break")
+    cmd_entry.bind("<Alt-F>", lambda e: (filter_entry.focus_set(),
+                                         filter_entry.icursor("end")) or "break")
+    cmd_entry.bind("<Alt-t>", lambda e: (num_entry.focus_set(),
+                                         num_entry.select_range(0, "end")) or "break")
+    cmd_entry.bind("<Alt-T>", lambda e: (num_entry.focus_set(),
+                                         num_entry.select_range(0, "end")) or "break")
 
     _cmd_visible = [False]
 
@@ -685,27 +690,111 @@ def _build_tk_dialog(tracks: list[dict], current: dict, cfg,
 
     tree.tag_configure("now", background="#1e3a5f", foreground="#93c5fd")
 
-    all_tracks = list(enumerate(tracks[:99], 1))
+    # Mutable state — updated live by _refresh_playlist
+    _state = {
+        "tracks":      tracks,
+        "current_pos": current_pos,
+    }
+
+    def _make_row(i: int, t: dict, cur_pos) -> tuple:
+        tag       = "now" if (cur_pos is not None and i - 1 == cur_pos) else ""
+        num_label = f"▶{i}" if tag == "now" else str(i)
+        return (str(i), num_label, t["title"],
+                t["artist"] or "—", t["duration"] or "", tag)
 
     def populate(filter_text: str = "") -> None:
+        """Full repopulate — used on startup and after filter changes."""
         tree.delete(*tree.get_children())
         q = filter_text.lower()
-        for i, t in all_tracks:
+        for i, t in enumerate(_state["tracks"], 1):
             if q and q not in t["title"].lower() and q not in t["artist"].lower():
                 continue
-            tag = "now" if (current_pos is not None and i - 1 == current_pos) else ""
-            num_label = f"▶{i}" if tag == "now" else str(i)
-            tree.insert("", "end", iid=str(i),
-                        values=(num_label, t["title"],
-                                t["artist"] or "—", t["duration"] or ""),
+            iid, num_label, title, artist, dur, tag = _make_row(
+                i, t, _state["current_pos"])
+            tree.insert("", "end", iid=iid,
+                        values=(num_label, title, artist, dur),
                         tags=(tag,))
-        if not filter_text and current_pos is not None:
-            iid = str(current_pos + 1)
+        cur = _state["current_pos"]
+        if not filter_text and cur is not None:
+            iid = str(cur + 1)
             if tree.exists(iid):
                 tree.see(iid)
                 tree.selection_set(iid)
 
     populate()
+
+    def _apply_playlist_diff(new_tracks: list[dict], new_cur_pos) -> None:
+        """
+        Diff-update the tree in O(n) — no full delete/reinsert.
+        Safe for thousands of songs: only touches rows that changed.
+        Called on main thread via root.after(0, ...).
+        """
+        _state["tracks"]      = new_tracks
+        _state["current_pos"] = new_cur_pos
+
+        q = filter_var.get().lower()
+
+        # Build ordered dict of expected rows after filter
+        new_rows: dict[str, tuple] = {}
+        for i, t in enumerate(new_tracks, 1):
+            if q and q not in t["title"].lower() and q not in t["artist"].lower():
+                continue
+            iid, num_label, title, artist, dur, tag = _make_row(
+                i, t, new_cur_pos)
+            new_rows[iid] = (num_label, title, artist, dur, tag)
+
+        existing_set = set(tree.get_children())
+        new_set      = set(new_rows)
+
+        # Delete removed rows first (frees iids for potential re-insert)
+        to_delete = existing_set - new_set
+        if to_delete:
+            tree.delete(*to_delete)
+
+        # Insert / update / reorder
+        for idx, (iid, (num_label, title, artist, dur, tag)) in \
+                enumerate(new_rows.items()):
+            vals = (num_label, title, artist, dur)
+            if tree.exists(iid):
+                if tree.item(iid, "values") != vals or \
+                        tree.item(iid, "tags") != (tag,):
+                    tree.item(iid, values=vals, tags=(tag,))
+                # Move to correct position if needed
+                cur_idx = tree.index(iid)
+                if cur_idx != idx:
+                    tree.move(iid, "", idx)
+            else:
+                tree.insert("", idx, iid=iid,
+                            values=vals, tags=(tag,))
+
+        # Restore / update selection
+        sel = tree.selection()
+        if sel and tree.exists(sel[0]):
+            tree.see(sel[0])
+        elif new_cur_pos is not None:
+            iid = str(new_cur_pos + 1)
+            if tree.exists(iid):
+                tree.selection_set(iid)
+                tree.see(iid)
+
+    def _refresh_playlist() -> None:
+        """
+        Fetch current playlist from MPD in background, diff-update tree.
+        No-op if client was not passed to the dialog.
+        """
+        if client is None:
+            return
+        import threading as _th
+        def _worker():
+            try:
+                new_tracks  = client.get_playlist()
+                new_current = client.get_current_song()
+                new_cur_pos = new_current.get("pos", None)
+                root.after(0, lambda: _apply_playlist_diff(
+                    new_tracks, new_cur_pos))
+            except Exception:
+                pass
+        _th.Thread(target=_worker, daemon=True).start()
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -825,9 +914,9 @@ def _build_tk_dialog(tracks: list[dict], current: dict, cfg,
     def global_key(event):
         k       = event.keysym
         focused = root.focus_get()
-        # When command entry has focus, only Escape passes through globally
-        if focused is cmd_entry and k != "Escape":
-            return   # let cmd_entry bindings handle it
+        # cmd_entry has its own complete key handler — skip global routing entirely
+        if focused is cmd_entry:
+            return
         if k in ("Up", "Down"):
             _focus_tree()
             _move_selection(-1 if k == "Up" else 1)
@@ -932,7 +1021,8 @@ def _build_tk_dialog(tracks: list[dict], current: dict, cfg,
 # WINDOWS
 # ============================================
 class WindowsInputDialog(InputDialog):
-    def show(self, tracks: list[dict], current: dict) -> str | None:
+    def show(self, tracks: list[dict], current: dict,
+             client=None) -> str | None:
         try:
             import ctypes
             try:
@@ -943,7 +1033,8 @@ class WindowsInputDialog(InputDialog):
             pass
         try:
             return _build_tk_dialog(tracks, current, _CFG,
-                                    "Segoe UI", self._mouse_pos)
+                                    "Segoe UI", self._mouse_pos,
+                                    client=client)
         except Exception as e:
             print(f"Windows dialog error: {e}")
             return self._fallback(tracks, current.get("pos"))
@@ -973,10 +1064,12 @@ class WindowsInputDialog(InputDialog):
 # MACOS
 # ============================================
 class MacOSInputDialog(InputDialog):
-    def show(self, tracks: list[dict], current: dict) -> str | None:
+    def show(self, tracks: list[dict], current: dict,
+             client=None) -> str | None:
         try:
             return _build_tk_dialog(tracks, current, _CFG,
-                                    "Helvetica Neue", self._mouse_pos)
+                                    "Helvetica Neue", self._mouse_pos,
+                                    client=client)
         except Exception as e:
             print(f"macOS dialog error: {e}")
             return self._fallback(tracks, current.get("pos"))
@@ -1006,11 +1099,12 @@ class MacOSInputDialog(InputDialog):
 # LINUX
 # ============================================
 class LinuxInputDialog(InputDialog):
-    def show(self, tracks: list[dict], current: dict) -> str | None:
-        # Tkinter first (richest UI, always available with Python)
+    def show(self, tracks: list[dict], current: dict,
+             client=None) -> str | None:
         if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
             result = _build_tk_dialog(tracks, current, _CFG,
-                                      "DejaVu Sans", self._mouse_pos)
+                                      "DejaVu Sans", self._mouse_pos,
+                                      client=client)
             if result is not None:
                 return result
 
@@ -1035,7 +1129,7 @@ class LinuxInputDialog(InputDialog):
             "--column", "Artist", "--column", "Duration",
             "--width", "700", "--height", "550", "--hide-header",
         ]
-        for i, t in enumerate(tracks[:99], 1):
+        for i, t in enumerate(tracks[:500], 1):   # zenity arg limit
             cmd += [str(i), t["title"] or "?",
                     t["artist"] or "—", t["duration"] or "?"]
         try:
@@ -1123,7 +1217,7 @@ def mpd_controller():
     current = client.get_current_song()
 
     dialog  = get_dialog()
-    result  = dialog.show(tracks, current)
+    result  = dialog.show(tracks, current, client=client)
 
     if not result or not result.strip():
         print("Cancelled.")
