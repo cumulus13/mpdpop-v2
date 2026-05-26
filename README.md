@@ -147,16 +147,19 @@ python3 mpdpop.py
 The command bar accepts any shell command. Output appears in a scrollable
 4-line terminal below the input.
 
+examples:
 ```
-$ mpc toggle              ← pause / resume
-$ mpc next                ← skip to next
-$ mpc prev                ← go back
-$ mpc volume +5           ← volume up 5%
-$ mpc volume -10          ← volume down 10%
-$ mpc status              ← show full MPD status
-$ mpc search artist Lorde ← search playlist
-$ mpc clear && mpc load myplaylist && mpc play
-$ mpc ls | head -20       ← pipes work too
+toggle              ← pause / resume
+next                ← skip to next
+prev                ← go back
+volume +5           ← volume up 5%
+volume -10          ← volume down 10%
+status              ← show full MPD status
+search artist Lorde ← search playlist
+clear
+load myplaylist
+play
+ls | head -20       ← pipes work too
 ```
 
 - `↑` / `↓` inside the command field cycles history (last `CMD_HISTORY` entries)
