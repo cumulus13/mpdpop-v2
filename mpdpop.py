@@ -164,6 +164,41 @@ class MPDClient:
         except Exception as e:
             return f"Error: {e}"
 
+    def get_status(self) -> dict:
+        """Return MPD status dict (repeat, random, single, consume, state, etc.)."""
+        try:
+            sock = self._connect()
+            sock.sendall(b"status\n")
+            response = self._read_response(sock)
+            sock.close()
+            status: dict = {}
+            for line in response.split("\n"):
+                if ": " in line:
+                    k, _, v = line.partition(": ")
+                    status[k.strip()] = v.strip()
+            return status
+        except Exception:
+            return {}
+
+    def toggle_option(self, option: str) -> tuple[bool, str]:
+        """
+        Toggle a boolean MPD option (repeat / random / single / consume).
+        Reads current state, sends opposite, returns (new_state, error_or_empty).
+        """
+        try:
+            status = self.get_status()
+            current_val = status.get(option, "0")
+            new_val = "0" if current_val == "1" else "1"
+            sock = self._connect()
+            sock.sendall(f"{option} {new_val}\n".encode())
+            response = self._read_response(sock)
+            sock.close()
+            if "OK" in response:
+                return new_val == "1", ""
+            return False, response
+        except Exception as e:
+            return False, str(e)
+
 
 # ============================================
 # DIALOG BASE
@@ -397,6 +432,60 @@ def _build_tk_dialog(tracks: list[dict], current: dict, cfg,
              bg="#0f172a", fg="#475569",
              font=(font_name, 8),
              anchor="w", pady=2).pack(fill="x", padx=10)
+
+    # Status badges row — repeat / single / random / consume
+    status_bar = tk.Frame(topbar, bg="#0f172a")
+    status_bar.pack(fill="x", padx=10, pady=(0, 6))
+
+    _STATUS_ON  = {"bg": "#1d4ed8", "fg": "#f8fafc"}
+    _STATUS_OFF = {"bg": "#1e293b", "fg": "#475569"}
+
+    def _make_badge(parent, text: str) -> tk.Label:
+        lbl = tk.Label(parent, text=text, padx=6, pady=1,
+                       font=(font_name, 8, "bold"),
+                       relief="flat", cursor="hand2", **_STATUS_OFF)
+        lbl.pack(side="left", padx=(0, 4))
+        return lbl
+
+    _badge_repeat  = _make_badge(status_bar, "⟳ REPEAT")
+    _badge_single  = _make_badge(status_bar, "① SINGLE")
+    _badge_random  = _make_badge(status_bar, "⤮ RANDOM")
+    _badge_consume = _make_badge(status_bar, "⌫ CONSUME")
+
+    def _update_status_badges(status: dict | None = None) -> None:
+        """Refresh badge colours from MPD status. Fetches if status not given."""
+        def _apply(st: dict):
+            for badge, key in ((_badge_repeat,  "repeat"),
+                               (_badge_single,  "single"),
+                               (_badge_random,  "random"),
+                               (_badge_consume, "consume")):
+                on = st.get(key, "0") == "1"
+                badge.config(**(  _STATUS_ON if on else _STATUS_OFF))
+
+        if status is not None:
+            _apply(status)
+            return
+
+        if client is None:
+            return
+
+        import threading as _th
+        def _fetch():
+            try:
+                st = client.get_status()
+                root.after(0, lambda: _apply(st))
+            except Exception:
+                pass
+        _th.Thread(target=_fetch, daemon=True).start()
+
+    # Badges are also clickable
+    _badge_repeat.bind( "<Button-1>", lambda _: _toggle_mpd_option("repeat"))
+    _badge_single.bind( "<Button-1>", lambda _: _toggle_mpd_option("single"))
+    _badge_random.bind( "<Button-1>", lambda _: _toggle_mpd_option("random"))
+    _badge_consume.bind("<Button-1>", lambda _: _toggle_mpd_option("consume"))
+
+    # Fetch initial badge state after mainloop starts
+    root.after(100, _update_status_badges)
 
     # ── Now-playing info panel ────────────────────────────────────────────────
     info_widgets: dict = {}
@@ -911,6 +1000,26 @@ def _build_tk_dialog(tracks: list[dict], current: dict, cfg,
 
     # ── Global key handler (any focused widget) ───────────────────────────────
 
+    def _toggle_mpd_option(option: str) -> None:
+        """
+        Toggle repeat/single/random/consume in background.
+        Updates badge colour immediately on success.
+        No-op if client not available.
+        """
+        if client is None:
+            return
+        import threading as _th
+        def _do():
+            new_state, err = client.toggle_option(option)
+            if not err:
+                # Re-fetch full status so all badges stay in sync
+                try:
+                    st = client.get_status()
+                    root.after(0, lambda: _update_status_badges(st))
+                except Exception:
+                    pass
+        _th.Thread(target=_do, daemon=True).start()
+
     def global_key(event):
         k       = event.keysym
         focused = root.focus_get()
@@ -945,6 +1054,16 @@ def _build_tk_dialog(tracks: list[dict], current: dict, cfg,
         if k in ("s", "S") and focused not in (filter_entry, num_entry, cmd_entry):
             _open_big_cover()
             return "break"
+        # ── MPD option toggles (work from any non-text widget) ────────────────
+        if focused not in (filter_entry, num_entry):
+            if k in ("r", "R"):
+                _toggle_mpd_option("repeat");  return "break"
+            if k in ("n", "N"):
+                _toggle_mpd_option("single");  return "break"
+            if k in ("z", "Z"):
+                _toggle_mpd_option("random");  return "break"
+            if k in ("o", "O"):
+                _toggle_mpd_option("consume"); return "break"
         if k == "Return" and focused is not filter_entry:
             play_selected()
             return "break"
@@ -1005,8 +1124,9 @@ def _build_tk_dialog(tracks: list[dict], current: dict, cfg,
         for child in topbar.winfo_children():
             if hasattr(child, "cget") and "↑↓" in str(child.cget("text")):
                 child.config(text=(
-                    "  ↑↓ nav  ·  Enter play  ·  F filter  ·  T track#  ·  "
-                    "S cover  ·  C cmd  [Tab/Alt+F/T to leave cmd]  ·  Esc cancel"
+                    "↑↓ nav · Enter play · F filter · T track# · "
+                    "S cover · C cmd [Tab/Alt+F/T] · R repeat · N single · "
+                    "Z random · O consume · Esc cancel"
                 ))
                 break
     except Exception:
