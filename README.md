@@ -11,9 +11,7 @@ are absent.
 
 [![Demo](https://github.com/cumulus13/mpdpop-v2/blob/b4348ca04cdf2c30cb142c2a7b27ef7203880181/mpdpop.webp)](https://github.com/cumulus13/mpdpop-v2/blob/b4348ca04cdf2c30cb142c2a7b27ef7203880181/mpdpop.webp)
 
-[![Overlay 1](https://github.com/cumulus13/mpdpop-v2/blob/b4348ca04cdf2c30cb142c2a7b27ef7203880181/overlay_1.png)](https://github.com/cumulus13/mpdpop-v2/blob/b4348ca04cdf2c30cb142c2a7b27ef7203880181/overlay_1.png)
-
-[![Overlay 2](https://github.com/cumulus13/mpdpop-v2/blob/b4348ca04cdf2c30cb142c2a7b27ef7203880181/overlay_2.png)](https://github.com/cumulus13/mpdpop-v2/blob/b4348ca04cdf2c30cb142c2a7b27ef7203880181/overlay_2.png)
+[![Overlay 1](https://github.com/cumulus13/mpdpop-v2/blob/99da1d993de2bba38db6524b6630b05053da4816/overlay1.png)](https://github.com/cumulus13/mpdpop-v2/blob/99da1d993de2bba38db6524b6630b05053da4816/overlay1.png)   [![Overlay 2](https://github.com/cumulus13/mpdpop-v2/blob/99da1d993de2bba38db6524b6630b05053da4816/overlay2.png)](https://github.com/cumulus13/mpdpop-v2/blob/99da1d993de2bba38db6524b6630b05053da4816/overlay2.png)   [![Overlay 3](https://github.com/cumulus13/mpdpop-v2/blob/99da1d993de2bba38db6524b6630b05053da4816/overlay3.png)](https://github.com/cumulus13/mpdpop-v2/blob/99da1d993de2bba38db6524b6630b05053da4816/overlay3.png)
 
 ---
 
