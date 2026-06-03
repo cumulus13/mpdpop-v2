@@ -11,6 +11,10 @@ are absent.
 
 [![Demo](https://github.com/cumulus13/mpdpop-v2/blob/b4348ca04cdf2c30cb142c2a7b27ef7203880181/mpdpop.webp)](https://github.com/cumulus13/mpdpop-v2/blob/b4348ca04cdf2c30cb142c2a7b27ef7203880181/mpdpop.webp)
 
+[![Overlay 1](https://github.com/cumulus13/mpdpop-v2/blob/b4348ca04cdf2c30cb142c2a7b27ef7203880181/overlay_1.png)](https://github.com/cumulus13/mpdpop-v2/blob/b4348ca04cdf2c30cb142c2a7b27ef7203880181/overlay_1.png)
+
+[![Overlay 2](https://github.com/cumulus13/mpdpop-v2/blob/b4348ca04cdf2c30cb142c2a7b27ef7203880181/overlay_2.png)](https://github.com/cumulus13/mpdpop-v2/blob/b4348ca04cdf2c30cb142c2a7b27ef7203880181/overlay_2.png)
+
 ---
 
 ## Files
