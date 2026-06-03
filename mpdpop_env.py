@@ -52,6 +52,20 @@ _DEFAULTS: dict[str, str] = {
     "DIALOG_HEIGHT":     "620",
     "PAGE_STEP":         "10",
     "WINDOW_ICON":       "",       # path to icon file (.ico / .png / .gif)
+
+    # Overlay (mpdpop_overlay.py)
+    "OVERLAY_SIZE":          "220",
+    "OVERLAY_X":             "-1",
+    "OVERLAY_Y":             "-1",
+    "OVERLAY_OPACITY":       "0.92",
+    "OVERLAY_REFLECTION":    "true",
+    "OVERLAY_POLL_MS":       "1000",
+    "OVERLAY_FONT":          "",
+    "OVERLAY_FONT_SIZE":     "10",
+    "OVERLAY_CONTROLS_SIZE": "32",
+    "OVERLAY_ALWAYS_ON_TOP": "true",
+    "OVERLAY_AUTO_START":    "false",
+    "OVERLAY_CORNER_RADIUS": "12",
 }
 
 
