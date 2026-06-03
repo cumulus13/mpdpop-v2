@@ -11,7 +11,7 @@ are absent.
 
 [![Demo](https://github.com/cumulus13/mpdpop-v2/blob/b4348ca04cdf2c30cb142c2a7b27ef7203880181/mpdpop.webp)](https://github.com/cumulus13/mpdpop-v2/blob/b4348ca04cdf2c30cb142c2a7b27ef7203880181/mpdpop.webp)
 
-[![Overlay 1](https://github.com/cumulus13/mpdpop-v2/blob/99da1d993de2bba38db6524b6630b05053da4816/overlay1.png)](https://github.com/cumulus13/mpdpop-v2/blob/99da1d993de2bba38db6524b6630b05053da4816/overlay1.png)   [![Overlay 2](https://github.com/cumulus13/mpdpop-v2/blob/99da1d993de2bba38db6524b6630b05053da4816/overlay2.png)](https://github.com/cumulus13/mpdpop-v2/blob/99da1d993de2bba38db6524b6630b05053da4816/overlay2.png)   [![Overlay 3](https://github.com/cumulus13/mpdpop-v2/blob/99da1d993de2bba38db6524b6630b05053da4816/overlay3.png)](https://github.com/cumulus13/mpdpop-v2/blob/99da1d993de2bba38db6524b6630b05053da4816/overlay3.png)
+[![Overlay 1](https://github.com/cumulus13/mpdpop-v2/blob/99da1d993de2bba38db6524b6630b05053da4816/overlay1.png)](https://github.com/cumulus13/mpdpop-v2/blob/99da1d993de2bba38db6524b6630b05053da4816/overlay1.png)      [![Overlay 2](https://github.com/cumulus13/mpdpop-v2/blob/99da1d993de2bba38db6524b6630b05053da4816/overlay2.png)](https://github.com/cumulus13/mpdpop-v2/blob/99da1d993de2bba38db6524b6630b05053da4816/overlay2.png)      [![Overlay 3](https://github.com/cumulus13/mpdpop-v2/blob/99da1d993de2bba38db6524b6630b05053da4816/overlay3.png)](https://github.com/cumulus13/mpdpop-v2/blob/99da1d993de2bba38db6524b6630b05053da4816/overlay3.png)
 
 ---
 
@@ -24,6 +24,7 @@ are absent.
 | `mpdpop_cache.py` | 655 | Layered cache: Redis → pickle → SQLAlchemy/SQLite |
 | `mpdpop_env.py` | 222 | Config loader (`mpdpop.env` + `os.environ`) |
 | `mpdpop.env` | 53 | Your settings and API keys (edit this) |
+| `mpdpop_overlay.py` | 1027 | CD Art Display-style always-on-top desktop overlay for MPD. |
 
 All five files must live in the **same directory**.
 
