@@ -91,9 +91,53 @@ def _slug(text: str) -> str:
     return re.sub(r"[^\w\-]", "_", text.lower())[:80]
 
 
-def _cache_path(cache_dir: Path, artist: str, title: str = "", ext: str = "jpg") -> Path:
-    key = hashlib.md5(f"{artist}|{title}".encode()).hexdigest()[:16]
-    return cache_dir / f"{_slug(artist)}_{key}.{ext}"
+def _album_from_path(mpd_file: str) -> str:
+    """
+    Extract album name from file path as a last resort when the Album tag
+    is missing. Uses the immediate parent directory name (usually the album).
+    e.g. "Artist/Some Album/01 - Track.flac" → "Some Album"
+    """
+    if not mpd_file:
+        return ""
+    parts = Path(mpd_file).parts
+    # parts[-1] = filename, parts[-2] = album dir (if it exists)
+    if len(parts) >= 2:
+        return parts[-2]
+    return ""
+
+
+def _cache_path(cache_dir: Path, artist: str, album: str) -> Path:
+    """
+    Stable cache key based ONLY on artist + album.
+    Never uses title — tracks on the same album always hit the same file.
+    If album is empty, the key degrades to artist-only (still stable across
+    tracks from the same artist when album tags are completely missing).
+    """
+    # normalise: strip, lowercase for the hash, keep original slug readable
+    norm_artist = artist.strip().lower()
+    norm_album  = album.strip().lower()
+    key = hashlib.md5(f"{norm_artist}|{norm_album}".encode()).hexdigest()[:16]
+    slug = _slug(artist)
+    # try jpg first (most common), but accept any extension when reading
+    return cache_dir / f"{slug}_{key}.jpg"
+
+
+def _find_cache_file(cache_dir: Path, artist: str, album: str) -> Path | None:
+    """
+    Return existing cache file for artist+album regardless of extension,
+    or None if not cached yet.
+    """
+    base = _cache_path(cache_dir, artist, album)
+    # exact path first
+    if base.exists():
+        return base
+    # try other extensions (png, gif, webp)
+    stem = base.stem
+    for ext in ("png", "gif", "webp", "jpeg"):
+        p = base.with_suffix(f".{ext}")
+        if p.exists():
+            return p
+    return None
 
 
 def _truncate(text: str, max_chars: int) -> str:
@@ -101,6 +145,14 @@ def _truncate(text: str, max_chars: int) -> str:
         return text
     cut = text[:max_chars].rsplit(" ", 1)[0]
     return cut.rstrip(".,;:") + "…"
+
+
+def _detect_image_ext(data: bytes) -> str:
+    """Detect image format from magic bytes. Returns 'jpg', 'png', 'gif', 'webp'."""
+    if data[:4] == b"\x89PNG":         return "png"
+    if data[:6] in (b"GIF87a", b"GIF89a"): return "gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP": return "webp"
+    return "jpg"   # default — JPEG magic is FF D8, but also covers unknowns
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -129,13 +181,26 @@ class CoverArtFetcher:
               mpd_file: str = "", mpd_host: str = "127.0.0.1",
               mpd_port: int = 6600) -> bytes | None:
         """Return raw image bytes or None. Caches to disk."""
+
+        # Resolve album: tag value → directory name from file path → empty
+        # This ensures tracks on the same album always share the same cache key
+        # even when some tracks have the Album tag and others don't.
+        if not album and mpd_file:
+            album = _album_from_path(mpd_file)
+
+        # With no artist AND no album we can't make a meaningful key
         if not artist and not album:
             return None
 
-        cache_file = _cache_path(self.cache_dir, artist, album or title)
-        if cache_file.exists():
-            return cache_file.read_bytes()
+        # Check cache — try all extensions, not just .jpg
+        cached = _find_cache_file(self.cache_dir, artist, album)
+        if cached is not None:
+            try:
+                return cached.read_bytes()
+            except OSError:
+                pass   # corrupted file — fall through to re-fetch
 
+        # Fetch from sources
         data = (
             self._from_mpd(mpd_host, mpd_port, mpd_file)
             or self._from_local(mpd_file)
@@ -145,8 +210,11 @@ class CoverArtFetcher:
         )
 
         if data:
+            # Detect actual format to store with correct extension
+            ext = _detect_image_ext(data)
+            out = _cache_path(self.cache_dir, artist, album).with_suffix(f".{ext}")
             try:
-                cache_file.write_bytes(data)
+                out.write_bytes(data)
             except OSError:
                 pass
 
@@ -155,39 +223,112 @@ class CoverArtFetcher:
     # ── source 1: MPD embedded picture ───────────────────────────────────────
 
     def _from_mpd(self, host: str, port: int, mpd_file: str) -> bytes | None:
+        """
+        MPD readpicture protocol (binary-safe):
+          → client sends:  readpicture "path/to/file" <offset>\n
+          ← server sends:  size: <total>\n
+                           type: image/jpeg\n
+                           binary: <chunk_size>\n
+                           <chunk_size raw bytes>\n
+                           OK\n
+          Repeat with increasing offset until all bytes received.
+        """
         if not mpd_file:
             return None
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(5)
-            sock.connect((host, port))
-            # consume banner
-            sock.recv(256)
-            sock.sendall(f'readpicture "{mpd_file}" 0\n'.encode())
-            header = b""
-            while b"\n" not in header:
-                chunk = sock.recv(256)
-                if not chunk:
-                    break
-                header += chunk
-            # header contains "size: N\ntype: image/jpeg\nbinary: N\n"
-            lines = header.decode(errors="replace").splitlines()
-            size_line = next((l for l in lines if l.startswith("binary:")), None)
-            if not size_line:
-                sock.close()
+            # helper: connect and consume banner
+            def _connect():
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(5)
+                s.connect((host, port))
+                buf = b""
+                while not buf.endswith(b"\n"):
+                    chunk = s.recv(1)
+                    if not chunk:
+                        break
+                    buf += chunk
+                return s
+
+            # helper: read lines until we hit the binary data marker
+            def _read_headers(s) -> dict:
+                headers = {}
+                buf = b""
+                while True:
+                    byte = s.recv(1)
+                    if not byte:
+                        break
+                    buf += byte
+                    if buf.endswith(b"\n"):
+                        line = buf.decode(errors="replace").strip()
+                        buf = b""
+                        if not line:
+                            continue
+                        if line == "OK":
+                            headers["_done"] = True
+                            break
+                        if line.startswith("ACK"):
+                            headers["_error"] = line
+                            break
+                        if ": " in line:
+                            k, _, v = line.partition(": ")
+                            headers[k.lower()] = v
+                        # stop at binary: N — binary data follows immediately
+                        if line.lower().startswith("binary:"):
+                            break
+                return headers
+
+            # helper: read exactly N bytes
+            def _read_exact(s, n: int) -> bytes:
+                data = b""
+                while len(data) < n:
+                    chunk = s.recv(min(4096, n - len(data)))
+                    if not chunk:
+                        break
+                    data += chunk
+                return data
+
+            # First request to get total size
+            s = _connect()
+            escaped = mpd_file.replace('"', '\\"')
+            s.sendall(f'readpicture "{escaped}" 0\n'.encode())
+            headers = _read_headers(s)
+
+            if "_error" in headers or "_done" in headers:
+                s.close()
                 return None
-            binary_size = int(size_line.split(":")[1].strip())
-            # find the start of binary data (after the blank line / binary: N\n)
-            data = b""
-            # read remaining binary_size bytes
-            while len(data) < binary_size:
-                chunk = sock.recv(min(4096, binary_size - len(data)))
-                if not chunk:
+
+            total_size = int(headers.get("size", 0))
+            chunk_size = int(headers.get("binary", 0))
+            if total_size == 0 or chunk_size == 0:
+                s.close()
+                return None
+
+            # Read first chunk
+            image_data = _read_exact(s, chunk_size)
+            s.recv(1)   # trailing \n after binary data
+            # consume OK\n
+            s.recv(3)
+            s.close()
+
+            # Read remaining chunks if image spans multiple requests
+            offset = chunk_size
+            while offset < total_size:
+                s = _connect()
+                s.sendall(f'readpicture "{escaped}" {offset}\n'.encode())
+                h2 = _read_headers(s)
+                sz2 = int(h2.get("binary", 0))
+                if sz2 == 0:
+                    s.close()
                     break
-                data += chunk
-            sock.sendall(b"close\n")
-            sock.close()
-            return data if len(data) == binary_size else None
+                chunk = _read_exact(s, sz2)
+                s.recv(1)   # trailing \n
+                s.recv(3)   # OK\n
+                s.close()
+                image_data += chunk
+                offset += sz2
+
+            return image_data if len(image_data) == total_size else None
+
         except Exception:
             return None
 
@@ -196,19 +337,39 @@ class CoverArtFetcher:
     def _from_local(self, mpd_file: str) -> bytes | None:
         if not mpd_file:
             return None
-        # mpd_file is relative to MPD music dir; try common root dirs
+
+        names = [
+            "folder.jpg", "cover.jpg", "front.jpg", "AlbumArt.jpg",
+            "folder.png", "cover.png", "front.png", "AlbumArt.png",
+            "album.jpg",  "album.png", "artwork.jpg", "artwork.png",
+            "Folder.jpg", "Cover.jpg", "Front.jpg",   # capitalised variants
+        ]
+
+        # Build candidate directories in priority order:
+        # 1. mpd_file as absolute path (if the file system is mounted)
+        # 2. Each known music root + mpd_file (relative path)
+        candidate_dirs: list[Path] = []
+
+        file_path = Path(mpd_file)
+        if file_path.is_absolute() and file_path.exists():
+            candidate_dirs.append(file_path.parent)
+        
         music_dirs = [
             os.environ.get("MPD_MUSIC_DIR", ""),
+            self.cfg.get("MPD_MUSIC_DIR", ""),
             os.path.expanduser("~/Music"),
             "/var/lib/mpd/music",
+            "/home/mpd/music",
         ]
-        names = ["folder.jpg", "cover.jpg", "front.jpg",
-                 "folder.png", "cover.png", "AlbumArt.jpg"]
         for base in music_dirs:
             if not base:
                 continue
             track_path = Path(base) / mpd_file
-            album_dir = track_path.parent
+            album_dir  = track_path.parent
+            if album_dir not in candidate_dirs:
+                candidate_dirs.append(album_dir)
+
+        for album_dir in candidate_dirs:
             for name in names:
                 p = album_dir / name
                 if p.exists():
@@ -216,6 +377,18 @@ class CoverArtFetcher:
                         return p.read_bytes()
                     except OSError:
                         pass
+
+            # Also try any *.jpg / *.png in the directory (glob fallback)
+            try:
+                for ext in ("*.jpg", "*.png", "*.gif"):
+                    candidates = sorted(album_dir.glob(ext))
+                    # skip files that look like track art (contain digits at start)
+                    for c in candidates:
+                        if not c.stem[:2].isdigit():
+                            return c.read_bytes()
+            except OSError:
+                pass
+
         return None
 
     # ── source 3: Last.fm ─────────────────────────────────────────────────────
