@@ -24,6 +24,31 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Callable
+import sys
+
+if any(i in ("--mpdpop-debug", "--debug") for i in sys.argv[1:]):
+    try:
+        from richcolorlog import setup_logging, print_traceback as tprint  # type: ignore
+        LOG_FILE_NAME = str(Path(__file__).parent / Path(__file__).stem ) + ".log"
+        print(f"LOG_FILE_NAME: {LOG_FILE_NAME}")
+        logger = setup_logging("MPDPOP", level="DEBUG", log_file=True, log_file_name=LOG_FILE_NAME)
+    except:
+        import logging
+        logger = logging.getLogger("MPDPOP")  # type: ignore
+        logger.setLevel(logging.DEBUG)  # type: ignore
+else:
+    class logger:
+        def info(self, *args, **kargs):
+            return
+
+        error = info
+        warning = info
+        notice = info
+        emergency = info
+        alert = info
+        debug = info
+        critical = info
+        ctraceback = info
 
 # ── lazy import guard ─────────────────────────────────────────────────────────
 try:
@@ -194,6 +219,7 @@ class CoverArtFetcher:
 
         # Check cache — try all extensions, not just .jpg
         cached = _find_cache_file(self.cache_dir, artist, album)
+        logger.debug(f"cached: {cached}")  # type: ignore
         if cached is not None:
             try:
                 return cached.read_bytes()
@@ -209,6 +235,7 @@ class CoverArtFetcher:
             or self._from_discogs(artist, album)
         )
 
+        logger.debug(f"data: {data}")  # type: ignore
         if data:
             # Detect actual format to store with correct extension
             ext = _detect_image_ext(data)
@@ -218,6 +245,7 @@ class CoverArtFetcher:
             except OSError:
                 pass
 
+        logger.debug(f"data: {data}")  # type: ignore
         return data
 
     # ── source 1: MPD embedded picture ───────────────────────────────────────

@@ -37,6 +37,30 @@ import subprocess
 import shutil
 from pathlib import Path
 
+if any(i in ("--mpdpop-debug", "--debug") for i in sys.argv[1:]):
+    try:
+        from richcolorlog import setup_logging, print_traceback as tprint  # type: ignore
+        LOG_FILE_NAME = str(Path(__file__).parent / Path(__file__).stem ) + ".log"
+        print(f"LOG_FILE_NAME: {LOG_FILE_NAME}")
+        logger = setup_logging("MPDPOP", level="DEBUG", log_file=True, log_file_name=LOG_FILE_NAME)
+    except:
+        import logging
+        logger = logging.getLogger("MPDPOP")  # type: ignore
+        logger.setLevel(logging.DEBUG)  # type: ignore
+else:
+    class logger:
+        def info(self, *args, **kargs):
+            return
+
+        error = info
+        warning = info
+        notice = info
+        emergency = info
+        alert = info
+        debug = info
+        critical = info
+        ctraceback = info
+
 # ── optional companion modules ────────────────────────────────────────────────
 try:
     from mpdpop_env import Config
@@ -63,7 +87,7 @@ try:
     _HAS_ARTINFO = True
 except ImportError:
     _HAS_ARTINFO = False
-    CoverArtFetcher = None
+    CoverArtFetcher = None  # type: ignore
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -182,22 +206,27 @@ class _CoverLoader:
     def __init__(self):
         self._cache_dir = _CFG.cover_cache_dir()
         self._lock      = threading.Lock()
-        self._current   = ""   # artist|album key of what's loading
+        self._current   = ""   # file path of what's currently loading
 
     def fetch(self, song: dict, on_done, root=None):
         """
-        Start background fetch. on_done(bytes|None) is called on the
-        Tkinter main thread if root is provided, otherwise directly.
+        Start background fetch. on_done(bytes|None) called on main thread.
+
+        Guard key is the file path — unique per track.
+        Same file = already loading/loaded, skip.
+        Different file = always fetch (even same artist/album).
         """
         artist = song.get("Artist", "")
         album  = song.get("Album",  "")
         title  = song.get("Title",  "")
         file_  = song.get("file",   "")
-        key    = f"{artist}|{album}"
+
+        # Use file path as the unique key — never blocks different tracks
+        key = file_ or f"{artist}|{title}"
 
         with self._lock:
             if self._current == key:
-                return   # already loading / loaded this one
+                return   # exact same file already loading
             self._current = key
 
         def _worker():
@@ -210,20 +239,33 @@ class _CoverLoader:
                         _cfg("MPD_HOST", "127.0.0.1"),
                         _cfgi("MPD_PORT", 6600),
                     )
+                    logger.debug(f"data: {data}")  # type: ignore
                 else:
+                    # Minimal fallback: scan cache dir for matching file
                     import hashlib, re as _re
-                    slug = _re.sub(r"[^\w]", "_",
-                                   f"{artist}{album}".lower())[:40]
-                    digest = hashlib.md5(
-                        f"{artist}|{album}".encode()).hexdigest()[:10]
-                    for ext in ("jpg", "png", "gif"):
-                        p = self._cache_dir / f"{slug}_{digest}.{ext}"
-                        if p.exists():
-                            data = p.read_bytes()
+                    # try artist+album key first, then artist+title
+                    for second in (album, title):
+                        slug = _re.sub(r"[^\w]", "_",
+                                       f"{artist}{second}".lower())[:40]
+                        digest = hashlib.md5(
+                            f"{artist}|{second}".encode()
+                        ).hexdigest()[:10]
+                        for ext in ("jpg", "png", "gif", "webp"):
+                            p = self._cache_dir / f"{slug}_{digest}.{ext}"
+                            if p.exists():
+                                data = p.read_bytes()
+                                break
+                        if data:
                             break
             except Exception:
-                pass
-            # Always dispatch to main thread
+                logger.ctraceback(e)
+
+            # Reset guard so the same file can be fetched again if needed
+            with self._lock:
+                if self._current == key:
+                    self._current = ""
+
+            # Dispatch to main thread
             if root is not None:
                 root.after(0, lambda: on_done(data))
             else:
