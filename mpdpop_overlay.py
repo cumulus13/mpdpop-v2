@@ -37,30 +37,6 @@ import subprocess
 import shutil
 from pathlib import Path
 
-if any(i in ("--mpdpop-debug", "--debug") for i in sys.argv[1:]):
-    try:
-        from richcolorlog import setup_logging, print_traceback as tprint  # type: ignore
-        LOG_FILE_NAME = str(Path(__file__).parent / Path(__file__).stem ) + ".log"
-        print(f"LOG_FILE_NAME: {LOG_FILE_NAME}")
-        logger = setup_logging("MPDPOP", level="DEBUG", log_file=True, log_file_name=LOG_FILE_NAME)
-    except:
-        import logging
-        logger = logging.getLogger("MPDPOP")  # type: ignore
-        logger.setLevel(logging.DEBUG)  # type: ignore
-else:
-    class logger:
-        def info(self, *args, **kargs):
-            return
-
-        error = info
-        warning = info
-        notice = info
-        emergency = info
-        alert = info
-        debug = info
-        critical = info
-        ctraceback = info
-
 # ── optional companion modules ────────────────────────────────────────────────
 try:
     from mpdpop_env import Config
@@ -87,7 +63,7 @@ try:
     _HAS_ARTINFO = True
 except ImportError:
     _HAS_ARTINFO = False
-    CoverArtFetcher = None  # type: ignore
+    CoverArtFetcher = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -239,7 +215,6 @@ class _CoverLoader:
                         _cfg("MPD_HOST", "127.0.0.1"),
                         _cfgi("MPD_PORT", 6600),
                     )
-                    logger.debug(f"data: {data}")  # type: ignore
                 else:
                     # Minimal fallback: scan cache dir for matching file
                     import hashlib, re as _re
@@ -258,7 +233,7 @@ class _CoverLoader:
                         if data:
                             break
             except Exception:
-                logger.ctraceback(e)
+                pass
 
             # Reset guard so the same file can be fetched again if needed
             with self._lock:
@@ -529,8 +504,9 @@ class MPDOverlay:
         self._build_scrollers()
 
         # Escape key quits the overlay
-        root.bind("<Escape>",    lambda _: root.destroy())
-        root.bind("<KeyPress-q>", lambda _: root.destroy())
+        root.bind("<Escape>",    lambda _: self._quit())
+        root.bind("<KeyPress-q>", lambda _: self._quit())
+        root.bind("<KeyPress-Q>", lambda _: self._quit())
         # M key toggles mirror/reflection
         root.bind("<KeyPress-m>", lambda _: self._toggle_mirror())
         root.bind("<KeyPress-M>", lambda _: self._toggle_mirror())
@@ -810,21 +786,51 @@ class MPDOverlay:
                          command=self._on_double_click)
         menu.add_separator()
         menu.add_command(label="✕  Close Overlay",
-                         command=self._root.destroy)
+                         command=self._quit)
         menu.tk_popup(e.x_root, e.y_root)
+
+    # ── shutdown ──────────────────────────────────────────────────────────────
+
+    def _quit(self):
+        """
+        Clean shutdown: stop the polling loop and tray icon before
+        destroying the window, so background threads exit promptly.
+        """
+        self._poll_running = False
+        if self._tray_icon is not None:
+            try:
+                self._tray_icon.stop()
+            except Exception:
+                pass
+        self._root.destroy()
 
     # ── polling ───────────────────────────────────────────────────────────────
 
     def _poll(self):
+        """
+        Start ONE persistent background polling thread (not a new thread
+        every cycle). The thread loops internally with time.sleep() and
+        pushes results to the main thread via root.after(0, ...).
+
+        Spawning threading.Thread() every second forever (3600/hour) causes
+        virtual memory creep on Windows due to per-thread stack reservations
+        not being promptly returned to the OS.
+        """
+        self._poll_running = True
+
         def _worker():
-            try:
-                status = self._mpd.status()
-                song   = self._mpd.currentsong()
-                self._root.after(0, lambda: self._update(status, song))
-            except Exception:
-                pass
-        threading.Thread(target=_worker, daemon=True).start()
-        self._root.after(self._poll_ms, self._poll)
+            while self._poll_running:
+                try:
+                    status = self._mpd.status()
+                    song   = self._mpd.currentsong()
+                    # Capture by value to avoid late-binding issues
+                    self._root.after(0, lambda s=status, g=song: self._update(s, g))
+                except Exception:
+                    pass
+                time.sleep(self._poll_ms / 1000.0)
+
+        self._poll_thread = threading.Thread(target=_worker, daemon=True)
+        self._poll_thread.start()
 
     def _update(self, status: dict, song: dict):
         changed_song = (song.get("file","") != self._song.get("file",""))
@@ -896,10 +902,21 @@ class MPDOverlay:
                 photo = ImageTk.PhotoImage(pil_rounded)
             except Exception:
                 pass
-            self._cover_pil   = pil_rounded
-            self._cover_photo = photo
+            new_cover_pil   = pil_rounded
+            new_cover_photo = photo
         else:
-            self._cover_photo = photo
+            new_cover_pil   = None
+            new_cover_photo = photo
+
+        # Release old Tcl-side images immediately (don't wait for GC).
+        # tk.PhotoImage / ImageTk.PhotoImage objects hold a Tcl image that
+        # is only freed when .blank() is called or refcount drops to 0 —
+        # explicit blanking helps Tcl's allocator return memory faster.
+        self._free_photo(self._cover_photo)
+        self._free_photo(self._reflect_photo)
+        self._cover_photo   = new_cover_photo
+        self._cover_pil     = new_cover_pil
+        self._reflect_photo = None
 
         self._canvas.delete("cover_img")
         self._canvas.create_image(0, 0, anchor="nw", image=self._cover_photo,
@@ -924,6 +941,16 @@ class MPDOverlay:
 
         # update system tray
         self._update_tray(data)
+
+    @staticmethod
+    def _free_photo(photo) -> None:
+        """Explicitly release a Tkinter PhotoImage's Tcl-side memory."""
+        if photo is None:
+            return
+        try:
+            photo.blank()   # frees the underlying Tcl image data in place
+        except Exception:
+            pass
 
     # ── animation loop ────────────────────────────────────────────────────────
 
@@ -986,6 +1013,7 @@ class MPDOverlay:
                 ref_photo = _make_reflection(
                     self._cover_pil, self._sz, self._ref_h)
                 if ref_photo:
+                    self._free_photo(self._reflect_photo)
                     self._reflect_photo = ref_photo
                     self._canvas.delete("reflect_img")
                     ry = self._sz + self.PBAR_H + self._txt_h
@@ -1034,8 +1062,7 @@ class MPDOverlay:
                         pystray.MenuItem("Open Playlist",
                                          lambda: self._on_double_click(None)),
                         pystray.MenuItem("Quit",
-                                         lambda: self._root.after(0,
-                                             self._root.destroy)),
+                                         lambda: self._root.after(0, self._quit)),
                     )
                 )
                 threading.Thread(target=self._tray_icon.run,
