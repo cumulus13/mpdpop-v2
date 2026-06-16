@@ -873,7 +873,10 @@ class MPDOverlay:
         # text
         title  = song.get("Title",  song.get("Name", "Unknown"))
         artist = song.get("Artist", "")
-        self._scroller_title.set_text(title)
+        album = song.get("Album", song.get("album", ""))
+        date = song.get("Date", song.get("date", ""))
+        if date: date = f"({date})"
+        self._scroller_title.set_text(title + " / " + album + " " + date)
         self._scroller_artist.set_text(artist)
 
         # cover art — reload only when track changes
